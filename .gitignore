@@ -1,0 +1,26 @@
+# Local credentials and environment configuration
+.env
+.env.*
+!.env.example
+secrets/
+*service-account*.json
+*service_account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local logs
+*.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
