@@ -22,11 +22,6 @@ on:
         required: true
         default: false
         type: boolean
-      send_enabled:
-        description: "Send public replies (unchecked = dry run)"
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
