@@ -133,7 +133,7 @@ jobs:
           GROQ_MODEL: "openai/gpt-oss-120b"
           CONTROL_PROJECT: "database-2-a5b32"
 
-          POLL_SECONDS: "8"
+          POLL_SECONDS: "60"
           SLOW_FLOOR: "15"
           QUOTA_COOLDOWN_SECONDS: "300"
 
