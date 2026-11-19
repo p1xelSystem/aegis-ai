@@ -932,7 +932,67 @@ class Worker:
             )
 
             return outcome(await complete())
+    async def already_replied(self, server, source):
+        if server not in MESSAGE_SERVERS:
+            raise RuntimeError("Server not allowed")
 
+        prefix = (
+            f"projects/{server}"
+            "/databases/(default)/documents/"
+        )
+
+        if (
+            not isinstance(source, str)
+            or not source.startswith(prefix)
+        ):
+            raise RuntimeError(
+                "Reply source escaped project scope"
+            )
+
+        parts = source[len(prefix):].split("/")
+
+        if (
+            len(parts) < 2
+            or len(parts) % 2 != 0
+            or any(not part for part in parts)
+            or parts[-2] != "messages"
+        ):
+            raise RuntimeError(
+                "Invalid reply source collection"
+            )
+
+        reply_id = "aegis_reply_" + hashlib.sha256(
+            (
+                self.uid + ":" + server + ":" + source
+            ).encode()
+        ).hexdigest()
+
+        name = (
+            source.rsplit("/", 1)[0]
+            + "/"
+            + reply_id
+        )
+
+        response = await fetch(
+            self.c,
+            "GET",
+            ROOT + name,
+            secrets=self.secret_values(),
+        )
+
+        if response.status_code == 200:
+            return True
+
+        if response.status_code == 404:
+            return False
+
+        raise RuntimeError(
+            "Cannot verify previous reply: "
+            + error_detail(
+                response,
+                self.secret_values(),
+            )
+        )
     async def send(
         self,
         server,
