@@ -650,9 +650,6 @@ class Worker:
         if controls.get("locked"):
             blocked.append("staff_locked")
 
-        if popup.get("active"):
-            blocked.append("site_lockout")
-
         if sigma.get("chatLocked"):
             blocked.append("sigma_chat_locked")
 
