@@ -942,9 +942,6 @@ class Worker:
         if server not in MESSAGE_SERVERS:
             raise RuntimeError("Server not allowed")
 
-        if channel not in CHANNELS:
-            raise RuntimeError("Channel not allowed")
-
         prefix = (
             f"projects/{server}"
             "/databases/(default)/documents/"
