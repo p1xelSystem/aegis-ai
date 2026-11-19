@@ -973,7 +973,7 @@ class Worker:
         response = await fetch(
             self.c,
             "GET",
-            ROOT + name,
+            ROOT.removesuffix("projects/") + name,
             secrets=self.secret_values(),
         )
 
@@ -1045,7 +1045,7 @@ class Worker:
             + reply_id
         )
 
-        path = ROOT + name
+        path = ROOT.removesuffix("projects/") + name
 
         exists = await fetch(
             self.c,
