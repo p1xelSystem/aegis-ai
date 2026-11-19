@@ -675,7 +675,7 @@ class Worker:
 
         return main_doc, profile, slow
 
-    async def recent(self, server):
+    async def recent(self, server,full_history=False):
         if server not in MESSAGE_SERVERS:
             raise RuntimeError("Server not allowed")
 
@@ -698,7 +698,11 @@ class Worker:
                             "direction": "DESCENDING",
                         }
                     ],
-                    "limit": 50,
+                    **(
+                        {}
+                        if full_history
+                        else {"limit": 50}
+                    ),
                 }
             },
         )
