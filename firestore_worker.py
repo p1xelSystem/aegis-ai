@@ -1256,50 +1256,21 @@ async def run(client, stop, sending):
         return
 
     seen = set()
-    cutoffs = {}
+    history_loaded = set()
     cooldowns = {}
     health = {}
 
-    # Each project's first successful query establishes
-    # a silent baseline, including projects that recover later.
-    async def read_server(server):
-        docs, cutoff = await w.recent(server)
+    pending = {
+        server: {}
+        for server in MESSAGE_SERVERS
+    }
 
-        if server not in cutoffs:
-            cutoffs[server] = parse_stamp(cutoff)
+    last_send = 0.0
 
-            seen.update(
-                (server, name)
-                for name, _ in docs
-            )
-
-            log.info(
-                "Silent content baseline: "
-                "server=%s; documents=%s",
-                server,
-                len(docs),
-            )
-
-        return docs
-
-    for server in MESSAGE_SERVERS:
-        try:
-            await read_server(server)
-            health[server] = "ok"
-
-        except QuotaExhausted:
-            health[server] = "quota"
-            cooldowns[server] = (
-                time.monotonic()
-                + QUOTA_COOLDOWN_SECONDS
-            )
-
-    await status.report(
-        state="watching",
-        detail="watching for @Aegis mentions",
-        force=True,
-        servers=health,
-        messagesSeen=len(seen),
+    status.note(
+        "Session starting: all channels, "
+        "historical messages included, sending=%s"
+        % sending
     )
 
     async def heartbeat():
@@ -1315,15 +1286,8 @@ async def run(client, stop, sending):
         heartbeat()
     )
 
-    last_send = 0.0
-
     try:
         while not stop.is_set():
-            await pause(POLL_SECONDS)
-
-            if stop.is_set():
-                break
-
             for server in MESSAGE_SERVERS:
                 if stop.is_set():
                     break
@@ -1334,15 +1298,33 @@ async def run(client, stop, sending):
                 ):
                     continue
 
-                try:
-                    docs = await read_server(server)
+                loading_history = (
+                    server not in history_loaded
+                )
 
-                except QuotaExhausted:
-                    health[server] = "quota"
+                try:
+                    docs, _ = await w.recent(
+                        server,
+                        full_history=loading_history,
+                    )
+
+                except Exception as exc:
+                    health[server] = "read_failed"
+
                     cooldowns[server] = (
                         time.monotonic()
                         + QUOTA_COOLDOWN_SECONDS
                     )
+
+                    log.warning(
+                        "Message read deferred: "
+                        "server=%s error=%s",
+                        server,
+                        type(exc).__name__,
+                    )
+
+                    if isinstance(exc, RuntimeError):
+                        log.warning("%s", exc)
 
                     await status.report(
                         servers=health
@@ -1351,7 +1333,48 @@ async def run(client, stop, sending):
 
                 health[server] = "ok"
 
+                new_count = 0
+
+                for name, message in docs:
+                    key = (server, name)
+
+                    if (
+                        key not in seen
+                        and name not in pending[server]
+                    ):
+                        pending[server][name] = message
+                        new_count += 1
+
+                if loading_history:
+                    history_loaded.add(server)
+
+                    log.info(
+                        "History loaded: "
+                        "server=%s documents=%d",
+                        server,
+                        len(docs),
+                    )
+
+                log.info(
+                    "Poll complete: server=%s "
+                    "documents=%d newly_queued=%d pending=%d",
+                    server,
+                    len(docs),
+                    new_count,
+                    len(pending[server]),
+                )
+
+                if not loading_history and len(docs) == 50:
+                    log.warning(
+                        "Polling window full on %s; "
+                        "a large burst of new messages "
+                        "may exceed the live polling window",
+                        server,
+                    )
+
                 await status.report(
+                    state="watching",
+                    detail="considering unanswered messages",
                     lastPollAt=datetime.now(
                         timezone.utc
                     ).isoformat(),
@@ -1361,45 +1384,71 @@ async def run(client, stop, sending):
                     servers=health,
                 )
 
-                if len(docs) == 50:
-                    log.warning(
-                        "Message window full on %s; "
-                        "older messages may be outside "
-                        "the polling window",
-                        server,
-                    )
+                # Keep context ordered newest-first.
+                context_map = dict(pending[server])
+                context_map.update(dict(docs))
 
-                for name, message in reversed(docs):
-                    key = (server, name)
+                context = sorted(
+                    context_map.items(),
+                    key=lambda item: parse_stamp(
+                        item[1]["timestamp"]
+                    ),
+                    reverse=True,
+                )
 
+                # Process the oldest queued message first.
+                queue = sorted(
+                    pending[server].items(),
+                    key=lambda item: parse_stamp(
+                        item[1]["timestamp"]
+                    ),
+                )
+
+                for name, message in queue:
                     if stop.is_set():
                         break
 
-                    if key in seen:
-                        continue
+                    key = (server, name)
+                    content = message.get("content", "")
 
-                    stamp = parse_stamp(
-                        message["timestamp"]
-                    )
-
-                    content = message.get(
-                        "content", ""
-                    )
-
+                    # No channel restriction, mention requirement,
+                    # or startup timestamp cutoff.
                     if (
-                        stamp <= cutoffs[server]
-                        or message.get("uid") == w.uid
+                        message.get("uid") == w.uid
                         or message.get("role") == "aegis"
-                        or message.get("channelId")
-                        not in CHANNELS
                         or not isinstance(content, str)
-                        or not MENTION.search(content)
+                        or not content.strip()
                     ):
                         seen.add(key)
+                        pending[server].pop(name, None)
                         continue
 
                     try:
+                        if await w.already_replied(
+                            server,
+                            name,
+                        ):
+                            log.info(
+                                "Previously answered message "
+                                "skipped: server=%s",
+                                server,
+                            )
+
+                            seen.add(key)
+                            pending[server].pop(name, None)
+                            continue
+
+                        log.info(
+                            "Unanswered message found: "
+                            "server=%s; checking controls",
+                            server,
+                        )
+
                         _, _, slow = await w.checks()
+
+                        stamp = parse_stamp(
+                            message["timestamp"]
+                        )
 
                         age_wait = max(
                             0.0,
@@ -1433,33 +1482,41 @@ async def run(client, stop, sending):
                         await status.report(
                             state="thinking",
                             detail=(
-                                "considering a mention on "
-                                + server
+                                "considering an unanswered "
+                                "message on " + server
                             ),
-                            force=True,
+                        )
+
+                        log.info(
+                            "Requesting model response: "
+                            "server=%s",
+                            server,
                         )
 
                         body = await w.generate(
-                            docs,
+                            context,
                             message,
+                        )
+
+                        log.info(
+                            "Model decision: "
+                            "server=%s result=%s",
+                            server,
+                            (
+                                "silence"
+                                if body is None
+                                else "reply"
+                            ),
                         )
 
                         if body is None:
                             seen.add(key)
-                            await status.report(
-                                state="watching",
-                                detail=(
-                                    "watching for "
-                                    "@Aegis mentions"
-                                ),
-                            )
+                            pending[server].pop(name, None)
                             continue
 
                         sent = False
 
                         if sending:
-                            # Re-read slowmode after generation
-                            # in case settings changed meanwhile.
                             _, _, slow = await w.checks()
 
                             age_wait = max(
@@ -1504,13 +1561,14 @@ async def run(client, stop, sending):
 
                         else:
                             log.info(
-                                "Dry run: reply prepared "
-                                "for a mention on %s; "
-                                "content not logged",
+                                "Dry run: would reply "
+                                "to an unanswered message "
+                                "on %s; content not logged",
                                 server,
                             )
 
                         seen.add(key)
+                        pending[server].pop(name, None)
 
                         counts = {
                             "messagesSeen": len(seen),
@@ -1531,17 +1589,14 @@ async def run(client, stop, sending):
                         await status.report(
                             state="watching",
                             detail=(
-                                "watching for @Aegis mentions"
+                                "considering unanswered "
+                                "messages"
                             ),
-                            force=True,
                             **counts,
                         )
 
                     except Exception as exc:
-                        if isinstance(
-                            exc,
-                            RateLimited,
-                        ):
+                        if isinstance(exc, RateLimited):
                             delay = max(
                                 1,
                                 exc.retry_after,
@@ -1556,7 +1611,8 @@ async def run(client, stop, sending):
                         )
 
                         log.warning(
-                            "Mention on %s deferred (%s); "
+                            "Message deferred: "
+                            "server=%s error=%s; "
                             "retrying after cooldown",
                             server,
                             type(exc).__name__,
@@ -1572,10 +1628,13 @@ async def run(client, stop, sending):
                                 "waiting before retry"
                             ),
                             servers=health,
-                            force=True,
                         )
 
+                        # Leave the message in pending.
                         break
+
+            if not stop.is_set():
+                await pause(POLL_SECONDS)
 
     finally:
         heartbeat_task.cancel()
@@ -1596,8 +1655,6 @@ async def run(client, stop, sending):
             "Session stopped; %d replies sent"
             % status.data["repliesSent"]
         )
-
-
 async def main():
     required = (
         "FIREBASE_API_KEY",
