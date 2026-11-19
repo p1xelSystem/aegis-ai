@@ -434,7 +434,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         expected_url = (
-            worker.ROOT + expected_name
+            "https://firestore.googleapis.com/v1/" + expected_name
         )
 
         self.assertEqual(
@@ -517,6 +517,30 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         w.request.assert_not_awaited()
+
+    async def test_already_replied_uses_canonical_document_url(self):
+        w = self.make_worker()
+        server = worker.MESSAGE_SERVERS[0]
+        source = self.source_path(server)
+        reply_id = "aegis_reply_" + hashlib.sha256(
+            (w.uid + ":" + server + ":" + source).encode()
+        ).hexdigest()
+        expected_url = (
+            "https://firestore.googleapis.com/v1/"
+            + source.rsplit("/", 1)[0] + "/" + reply_id
+        )
+        for status, expected in ((200, True), (404, False)):
+            with self.subTest(status=status):
+                with patch.object(
+                    worker, "fetch", new_callable=AsyncMock,
+                    return_value=httpx.Response(status),
+                ) as mocked_fetch:
+                    self.assertIs(
+                        await w.already_replied(server, source), expected
+                    )
+                    self.assertEqual(
+                        mocked_fetch.await_args.args[2], expected_url
+                    )
 
     async def test_recent_rejects_unknown_server(self):
         w = worker.Worker(None)
